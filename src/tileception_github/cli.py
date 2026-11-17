@@ -64,7 +64,7 @@ def units_directory(paths: Paths) -> Path:
     return paths.config.parent / "systemd/user"
 
 
-def ensure_gh_login():
+def ensure_gh_login(non_interactive: bool = False):
     gh = shutil.which("gh")
     if not gh:
         raise ValueError("Install the GitHub CLI first: https://cli.github.com")
@@ -72,7 +72,7 @@ def ensure_gh_login():
     if not status.returncode:
         print("Using your GitHub CLI login", flush=True)
         return
-    if not sys.stdin.isatty():
+    if non_interactive or not sys.stdin.isatty():
         raise ValueError("gh is not logged in; run gh auth login in a terminal first")
     print("Log in to GitHub with the GitHub CLI; the plugin reuses that login.", flush=True)
     subprocess.run([gh, "auth", "login", "--hostname", "github.com"], check=True)
@@ -183,12 +183,13 @@ def choose_repos(paths: Paths):
         print("The next sync applies the new selection.")
 
 
-def install(paths: Paths, enable_timer: bool):
+def install(paths: Paths, enable_timer: bool, non_interactive: bool = False):
+    non_interactive = non_interactive or not sys.stdin.isatty()
     command = shutil.which("tileception-github")
     if not command:
         raise ValueError("Install the package first, for example with uv pip install .")
     command = str(Path(command).absolute())
-    ensure_gh_login()
+    ensure_gh_login(non_interactive=non_interactive)
     for directory in (paths.config, paths.cache):
         private_directory(directory)
     if not paths.config_file.exists():
@@ -205,9 +206,15 @@ def install(paths: Paths, enable_timer: bool):
         f'command = {json.dumps(command)}\nargs = ["serve"]\n[launcher]\nprefixes = ["gh"]\n'
     )
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    print("Running the initial GitHub synchronization.", flush=True)
-    run_sync(paths)
-    if not enable_timer and sys.stdin.isatty():
+    if non_interactive:
+        subprocess.run(
+            ["systemctl", "--user", "start", "--no-block", "tileception-github-sync.service"], check=True
+        )
+        print("Initial GitHub sync queued in the background. Use tileception-github status for progress.")
+    else:
+        print("Running the initial GitHub synchronization.", flush=True)
+        run_sync(paths)
+    if not enable_timer and not non_interactive:
         enable_timer = input("Enable the 10-minute GitHub sync timer now? [y/N] ").strip().lower() in {
             "y",
             "yes",
@@ -216,7 +223,7 @@ def install(paths: Paths, enable_timer: bool):
         subprocess.run(
             ["systemctl", "--user", "enable", "--now", "tileception-github-sync.timer"], check=True
         )
-    print("GitHub search is ready. Run tileception msg plugins reload, or restart Tileception.")
+    print("GitHub plugin installed. Run tileception msg plugins reload, or restart Tileception.")
     print("Use tileception-github repos to always include or exclude repositories.")
 
 
@@ -243,6 +250,9 @@ def main():
     sub.add_parser("repos", help="always include or exclude repositories")
     installer = sub.add_parser("install")
     installer.add_argument("--enable-timer", action="store_true")
+    installer.add_argument(
+        "--non-interactive", action="store_true", help="skip prompts and queue the first sync"
+    )
     opener = sub.add_parser("open", help="open a GitHub URL and remember it for ranking")
     opener.add_argument("url")
     args = parser.parse_args()
@@ -260,7 +270,7 @@ def main():
         elif args.command == "repos":
             choose_repos(paths)
         elif args.command == "install":
-            install(paths, enable_timer=args.enable_timer)
+            install(paths, enable_timer=args.enable_timer, non_interactive=args.non_interactive)
         elif args.command == "open":
             open_url(paths, args.url)
         elif args.command == "status":

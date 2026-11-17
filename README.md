@@ -21,7 +21,11 @@ tileception-github install
 Installation runs `gh auth login` when needed, installs the manifest and user
 units, runs the first sync and offers the timer. Then run
 `tileception msg plugins reload`. For unattended setup, log in with `gh` first
-and run `tileception-github install --enable-timer`.
+and run `tileception-github install --non-interactive --enable-timer`.
+Non-interactive installs queue the first sync with `systemctl --no-block` and
+return without waiting for it; this also applies when standard input is not a
+terminal. Use `tileception-github status` to follow progress. Interactive installs
+wait for synchronization and show its progress.
 
 ## Choosing repositories
 
@@ -53,7 +57,17 @@ saves and Esc cancels. It offers to sync right away. The configuration lives in
 | `gh tile 105`, `gh tile#105`         | #105 in repositories whose name matches `tile`    |
 | `gh owner/repo#105`, a GitHub URL    | exactly that item, even outside your selection    |
 | `gh owner/repo`, `gh tile`           | the repository home page, then recent activity    |
-| `gh login bug`                       | text in titles, branches, labels, authors, bodies |
+| `gh login bug`                       | text in titles, source branches, repositories, labels and authors |
+| `gh feature/login-fix`               | PRs whose source branch matches, plus any matching repository |
+| `gh login`, `gh login fix`           | also matches branch components such as `feature/login-fix` |
+
+Text search excludes PR and issue bodies to avoid noisy matches from templates
+and incidental mentions. Words separated by `/`, `-` or `_` are searchable
+individually, and each typed word can match a prefix. Titles, repository names,
+labels, source branches and authors determine relevance; matches containing all
+words rank above partial matches. Short metadata also supports typo tolerance.
+After updating, run `tileception-github sync` once to upgrade the existing search
+index without downloading the whole cache again.
 
 Tab on a result narrows the search to its repository. Number queries answer
 from the cache at once, then add live GitHub results the cache does not have
