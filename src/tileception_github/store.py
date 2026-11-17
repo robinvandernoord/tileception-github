@@ -11,6 +11,8 @@ from pathlib import Path
 
 from rapidfuzz import fuzz
 
+SEARCH_WORD = re.compile(r"[^\W_]+")
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS items (
@@ -21,7 +23,7 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
     title, repo, labels, branch, author, body, content='items', content_rowid='rowid',
-    tokenize='unicode61 remove_diacritics 2 tokenchars ''-_'''
+    tokenize='unicode61 remove_diacritics 2'
 );
 CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items BEGIN
     INSERT INTO items_fts(rowid,title,repo,labels,branch,author,body)
@@ -52,7 +54,17 @@ class Store:
         if writable:
             self.db = sqlite3.connect(filename, timeout=5)
             self.db.execute("PRAGMA journal_mode=WAL")
-            self.db.executescript(SCHEMA)
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
+                # Reindex existing caches so branch components separated by '-' or '_'
+                # are searchable too. Keep the items and their sync checkpoints intact.
+                self.db.executescript(
+                    "BEGIN; DROP TABLE IF EXISTS items_fts;"
+                    + SCHEMA
+                    + "INSERT INTO items_fts(items_fts) VALUES ('rebuild');"
+                    "PRAGMA user_version=1; COMMIT;"
+                )
+            else:
+                self.db.executescript(SCHEMA)
             filename.chmod(0o600)
         else:
             self.db = sqlite3.connect(f"{filename.as_uri()}?mode=ro", uri=True, timeout=0.2)
@@ -141,8 +153,9 @@ class Store:
     ) -> dict[tuple[str, int], tuple[float, dict]]:
         """Candidates with a text relevance score; callers add ranking signals as tie-breakers.
 
-        Items containing every word outrank items containing some, which outrank fuzzy title
-        matches. Without the tiers, one common word (such as part of the repository name)
+        Metadata containing every word outranks metadata containing some, followed by fuzzy
+        matches. Bodies are excluded to keep templates and incidental mentions out of results.
+        Without the tiers, one common word (such as part of the repository name)
         lets open, recent items drown out the item that actually mentions the rest.
         """
         ranked: dict[tuple[str, int], tuple[float, dict | None]] = {}
@@ -152,9 +165,7 @@ class Store:
                 return {}
             scope = f" AND i.repo COLLATE NOCASE IN ({','.join('?' * len(repos))})"
             values = list(repos)
-        terms = [
-            '"' + token.replace('"', "") + '"*' for token in re.findall(r"[\w-]+", query, re.UNICODE)[:24]
-        ]
+        terms = ['"' + token + '"*' for token in SEARCH_WORD.findall(query)[:24]]
         hits = []
         for operator, tier in ((" AND ", TIER_ALL), (" OR ", TIER_ANY)):
             if not terms:
@@ -162,7 +173,7 @@ class Store:
             hits = self.db.execute(
                 f"""SELECT i.* FROM items_fts JOIN items i ON i.rowid=items_fts.rowid
                 WHERE items_fts MATCH ?{scope} ORDER BY bm25(items_fts,8,4,3,3,2,1) LIMIT ?""",
-                (operator.join(terms), *values, limit),
+                ("{title repo labels branch author} : (" + operator.join(terms) + ")", *values, limit),
             ).fetchall()
             for index, row in enumerate(hits):
                 ranked[(row["repo"], row["number"])] = (tier - index, dict(row))
@@ -171,11 +182,11 @@ class Store:
         if len(hits) < 5:
             # Typo tolerance for short metadata, only while exact words find little: every
             # typed word must closely resemble some word of the title, branch or labels.
-            words = re.findall(r"[\w-]+", query.casefold())
+            words = SEARCH_WORD.findall(query.casefold())[:24]
             sql = "SELECT repo,number,title,branch,labels FROM items i WHERE 1=1" + scope
             for row in self.db.execute(sql, values) if words else ():
                 text = f"{row['title']} {row['branch']} {row['labels']}".casefold()
-                candidates = set(re.findall(r"[\w-]+", text))
+                candidates = set(SEARCH_WORD.findall(text))
                 score = min(
                     max((fuzz.ratio(word, other) for other in candidates), default=0) for word in words
                 )

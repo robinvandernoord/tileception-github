@@ -76,7 +76,21 @@ def cached_results(store: Store, query: Query, selected: list[str], frecency: Fr
         items = store.by_number(query.number, selected if query.repos is None else query.repos)
         return sorted(items, key=lambda item: -rank_bonus(item, frecency))
     if query.repos is not None:
-        return store.recent(query.repos)
+        recent = store.recent(query.repos)
+        if REPO_PATTERN.fullmatch(query.text):
+            # A source branch such as "feature/login" also looks like owner/repo.
+            # Keep repository navigation, but include matching branches across the cache.
+            branches = [
+                (score, item)
+                for score, item in store.text_search(query.text).values()
+                if query.text.casefold() in item["branch"].casefold()
+            ]
+            branches.sort(key=lambda pair: -(pair[0] + RANK_WEIGHT * rank_bonus(pair[1], frecency)))
+            seen = {(item["repo"], item["number"]) for _, item in branches}
+            return [item for _, item in branches] + [
+                item for item in recent if (item["repo"], item["number"]) not in seen
+            ]
+        return recent
     scored = {}
     first, _, rest = query.text.partition(" ")
     if rest.strip():
